@@ -1,5 +1,5 @@
 import pytest
-from datetime import time, datetime, timedelta
+from datetime import date, time, datetime, timedelta
 from pawpal_system import Task, Pet, Owner, Scheduler
 
 
@@ -296,43 +296,37 @@ class TestScheduler:
         assert scheduler.has_conflicts() is False
     
     def test_has_conflicts_with_overlapping_times(self):
-        """Test conflict detection with overlapping task times"""
+        """Test conflict detection with overlapping task times.
+
+        has_conflicts() reads all_scheduled_tasks (cross-pet pool),
+        so we populate that directly to force an overlap scenario.
+        task1 runs 10:00-10:30, task2 starts at 10:15 — they overlap.
+        """
         scheduler = Scheduler()
-        owner = Owner(name="John")
-        owner.add_availability_window(time(9, 0), time(17, 0))
-        
-        pet = Pet(name="Buddy", pet_type="dog")
+
         task1 = Task(task_type="feeding", priority=1, duration=30)
         task2 = Task(task_type="exercise", priority=2, duration=30)
-        
-        pet.add_requirement(task1)
-        pet.add_requirement(task2)
-        
-        scheduler.schedule(owner, pet)
-        
-        # Set overlapping times
         task1.set_scheduled_time(time(10, 0))
         task2.set_scheduled_time(time(10, 15))
-        
-        # Note: has_conflicts checks cached_scheduled_tasks
-        # After schedule(), tasks should be in cache
-        # Setting times manually for this test
-        scheduler.cached_scheduled_tasks = [task1, task2]
-        
+
+        scheduler.all_scheduled_tasks = [task1, task2]
+
         assert scheduler.has_conflicts() is True
-    
+
     def test_no_conflicts_with_non_overlapping_times(self):
-        """Test no conflicts with non-overlapping times"""
+        """Test no conflicts when tasks are back-to-back with no overlap.
+
+        task1 runs 10:00-10:30, task2 starts at 11:00 — gap between them.
+        """
         scheduler = Scheduler()
-        
+
         task1 = Task(task_type="feeding", priority=1, duration=30)
         task2 = Task(task_type="exercise", priority=2, duration=30)
-        
         task1.set_scheduled_time(time(10, 0))
         task2.set_scheduled_time(time(11, 0))
-        
-        scheduler.cached_scheduled_tasks = [task1, task2]
-        
+
+        scheduler.all_scheduled_tasks = [task1, task2]
+
         assert scheduler.has_conflicts() is False
     
     def test_schedule_multiple_tasks(self):
@@ -390,21 +384,276 @@ class TestIntegration:
     def test_pet_care_tracking(self):
         """Test tracking pet care activities"""
         pet = Pet(name="Fluffy", pet_type="cat")
-        
+
         # Initial state
         assert not pet.has_been_fed()
-        
+
         # Feed the pet
         pet.feed()
         assert pet.has_been_fed()
         fed_time = pet.get_last_fed_time()
         assert fed_time is not None
-        
+
         # Exercise the pet
         pet.exercise()
         exercise_time = pet.get_last_exercise_time()
         assert exercise_time is not None
-        
+
         # Add health info
         pet.add_health_problem("diabetes")
         assert "diabetes" in pet.get_health_problems()
+
+
+class TestSortByTime:
+    """Tests for Scheduler.sort_by_time()
+
+    sort_by_time() takes any list of Task objects and returns a NEW list
+    sorted by scheduled_start_time ascending. Tasks with no time (None)
+    go to the end. The original list must not be mutated.
+    """
+
+    def test_sorts_tasks_in_chronological_order(self):
+        """Tasks added in reverse time order come out sorted earliest-first."""
+        scheduler = Scheduler()
+
+        # Create three tasks and assign times out of order
+        t1 = Task(task_type="Walk",    priority=1, duration=30)
+        t2 = Task(task_type="Feeding", priority=2, duration=15)
+        t3 = Task(task_type="Meds",    priority=3, duration=10)
+
+        t1.set_scheduled_time(time(10, 0))   # 10:00
+        t2.set_scheduled_time(time(8, 0))    # 08:00  ← earliest
+        t3.set_scheduled_time(time(9, 0))    # 09:00
+
+        # Pass them in wrong order — sort_by_time must fix it
+        result = scheduler.sort_by_time([t1, t3, t2])
+
+        # Expect 08:00 → 09:00 → 10:00
+        assert result[0].get_scheduled_time() == time(8, 0)
+        assert result[1].get_scheduled_time() == time(9, 0)
+        assert result[2].get_scheduled_time() == time(10, 0)
+
+    def test_none_times_placed_at_end(self):
+        """A task with no scheduled time should sort after all timed tasks."""
+        scheduler = Scheduler()
+
+        timed   = Task(task_type="Feeding", priority=1, duration=15)
+        no_time = Task(task_type="Grooming", priority=2, duration=45)
+
+        timed.set_scheduled_time(time(9, 0))
+        # no_time has no scheduled_start_time (None)
+
+        result = scheduler.sort_by_time([no_time, timed])
+
+        # timed task must come first; None task at the end
+        assert result[0] == timed
+        assert result[1] == no_time
+
+    def test_does_not_mutate_original_list(self):
+        """sort_by_time must return a new list, leaving the input unchanged."""
+        scheduler = Scheduler()
+
+        t1 = Task(task_type="Walk",    priority=1, duration=30)
+        t2 = Task(task_type="Feeding", priority=2, duration=15)
+        t1.set_scheduled_time(time(10, 0))
+        t2.set_scheduled_time(time(8, 0))
+
+        original = [t1, t2]
+        result = scheduler.sort_by_time(original)
+
+        # Original order must be untouched
+        assert original[0] == t1
+        assert original[1] == t2
+        # Result is a different object
+        assert result is not original
+
+    def test_already_sorted_list_unchanged(self):
+        """A list already in order should come out in the same order."""
+        scheduler = Scheduler()
+
+        t1 = Task(task_type="Walk",    priority=1, duration=30)
+        t2 = Task(task_type="Feeding", priority=2, duration=15)
+        t1.set_scheduled_time(time(8, 0))
+        t2.set_scheduled_time(time(9, 0))
+
+        result = scheduler.sort_by_time([t1, t2])
+
+        assert result[0] == t1
+        assert result[1] == t2
+
+
+class TestRecurrence:
+    """Tests for Task.mark_complete() recurrence logic.
+
+    When a task has frequency="daily" or "weekly", mark_complete() should:
+      - Set the task's own status to "complete"
+      - Return a NEW Task with due_date = today + 1 day (daily) or + 7 days (weekly)
+      - The new task must be "pending" and preserve type, priority, duration, pet_name
+
+    When frequency=None, mark_complete() returns None (one-off task).
+    """
+
+    def test_one_off_task_returns_none(self):
+        """mark_complete() on a task with no frequency returns None."""
+        task = Task(task_type="Vaccination", priority=1, duration=20)
+        result = task.mark_complete()
+
+        assert result is None
+        assert task.get_status() == "complete"
+
+    def test_daily_task_creates_next_occurrence(self):
+        """Daily task produces a new task due tomorrow."""
+        task = Task(task_type="Feeding", priority=1, duration=15, frequency="daily")
+        next_task = task.mark_complete()
+
+        assert next_task is not None
+        # Due date must be exactly one day after today
+        assert next_task.due_date == date.today() + timedelta(days=1)
+
+    def test_weekly_task_creates_next_occurrence(self):
+        """Weekly task produces a new task due in 7 days."""
+        task = Task(task_type="Grooming", priority=3, duration=45, frequency="weekly")
+        next_task = task.mark_complete()
+
+        assert next_task is not None
+        assert next_task.due_date == date.today() + timedelta(weeks=1)
+
+    def test_recurring_task_preserves_fields(self):
+        """Next occurrence must carry over type, priority, duration, pet_name."""
+        task = Task(
+            task_type="Morning Walk",
+            priority=2,
+            duration=30,
+            frequency="daily",
+            pet_name="Mochi",
+        )
+        next_task = task.mark_complete()
+
+        assert next_task is not None   # guard: confirms recurrence fired
+        assert next_task.get_type()     == "Morning Walk"
+        assert next_task.get_priority() == 2
+        assert next_task.get_duration() == 30
+        assert next_task.pet_name       == "Mochi"
+        assert next_task.frequency      == "daily"
+
+    def test_recurring_task_starts_pending(self):
+        """Auto-generated next task must start with status 'pending'."""
+        task = Task(task_type="Feeding", priority=1, duration=15, frequency="daily")
+        next_task = task.mark_complete()
+
+        assert next_task is not None
+        assert next_task.get_status() == "pending"
+
+    def test_recurring_task_has_new_id(self):
+        """Next occurrence must be a distinct Task with its own unique ID."""
+        task = Task(task_type="Feeding", priority=1, duration=15, frequency="daily")
+        next_task = task.mark_complete()
+
+        assert next_task is not None
+        assert next_task.get_task_id() != task.get_task_id()
+
+
+class TestScheduleAll:
+    """Tests for Scheduler.schedule_all() and cross-pet conflict detection.
+
+    schedule_all() runs every pet's tasks through ONE shared window pool.
+    This prevents two pets from being assigned the same time slot.
+    """
+
+    def _make_owner(self):
+        """Helper: owner with a single 8:00–17:00 window."""
+        owner = Owner(name="Jordan")
+        owner.add_availability_window(time(8, 0), time(17, 0))
+        return owner
+
+    def test_schedule_all_returns_dict_keyed_by_pet_name(self):
+        """schedule_all() must return {pet_name: [tasks]} for each pet."""
+        owner = self._make_owner()
+
+        dog = Pet(name="Mochi", pet_type="dog")
+        dog.add_requirement(Task(task_type="Walk", priority=1, duration=30))
+        owner.add_pet(dog)
+
+        cat = Pet(name="Whiskers", pet_type="cat")
+        cat.add_requirement(Task(task_type="Feeding", priority=1, duration=10))
+        owner.add_pet(cat)
+
+        scheduler = Scheduler()
+        result = scheduler.schedule_all(owner)
+
+        assert "Mochi"    in result
+        assert "Whiskers" in result
+
+    def test_no_cross_pet_time_conflicts(self):
+        """Two pets with equal-priority tasks must not share a time slot."""
+        owner = self._make_owner()
+
+        dog = Pet(name="Dog", pet_type="dog")
+        dog.add_requirement(Task(task_type="Walk",    priority=1, duration=30))
+
+        cat = Pet(name="Cat", pet_type="cat")
+        cat.add_requirement(Task(task_type="Feeding", priority=1, duration=30))
+
+        owner.add_pet(dog)
+        owner.add_pet(cat)
+
+        scheduler = Scheduler()
+        scheduler.schedule_all(owner)
+
+        # The shared pool means no two tasks can overlap
+        assert scheduler.has_conflicts() is False
+
+    def test_filter_by_pet_returns_only_that_pets_tasks(self):
+        """filter_by_pet() must return only the tasks belonging to the named pet."""
+        owner = self._make_owner()
+
+        dog = Pet(name="Mochi", pet_type="dog")
+        dog.add_requirement(Task(task_type="Walk",    priority=1, duration=30))
+        dog.add_requirement(Task(task_type="Feeding", priority=2, duration=15))
+
+        cat = Pet(name="Whiskers", pet_type="cat")
+        cat.add_requirement(Task(task_type="Feeding", priority=1, duration=10))
+
+        owner.add_pet(dog)
+        owner.add_pet(cat)
+
+        scheduler = Scheduler()
+        scheduler.schedule_all(owner)
+
+        mochi_tasks    = scheduler.filter_by_pet("Mochi")
+        whiskers_tasks = scheduler.filter_by_pet("Whiskers")
+
+        # Mochi has 2 tasks, Whiskers has 1
+        assert len(mochi_tasks)    == 2
+        assert len(whiskers_tasks) == 1
+        # No Whiskers task leaked into Mochi's results
+        assert all(t.pet_name == "Mochi"    for t in mochi_tasks)
+        assert all(t.pet_name == "Whiskers" for t in whiskers_tasks)
+
+    def test_filter_by_pet_unknown_name_returns_empty(self):
+        """Filtering by a pet name that was never scheduled returns []."""
+        owner = self._make_owner()
+        dog = Pet(name="Mochi", pet_type="dog")
+        dog.add_requirement(Task(task_type="Walk", priority=1, duration=30))
+        owner.add_pet(dog)
+
+        scheduler = Scheduler()
+        scheduler.schedule_all(owner)
+
+        assert scheduler.filter_by_pet("Ghost") == []
+
+    def test_reset_clears_all_state(self):
+        """reset() must wipe all accumulated tasks so a fresh schedule starts clean."""
+        owner = self._make_owner()
+        dog = Pet(name="Mochi", pet_type="dog")
+        dog.add_requirement(Task(task_type="Walk", priority=1, duration=30))
+        owner.add_pet(dog)
+
+        scheduler = Scheduler()
+        scheduler.schedule_all(owner)
+        assert len(scheduler.all_scheduled_tasks) > 0
+
+        scheduler.reset()
+        assert scheduler.all_scheduled_tasks    == []
+        assert scheduler.cached_scheduled_tasks == []
+        assert scheduler.cached_skipped_tasks   == []

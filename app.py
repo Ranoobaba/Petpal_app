@@ -4,7 +4,7 @@ from pawpal_system import Task, Pet, Owner, Scheduler
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
-# --- Session State: Owner persists (and pets + their tasks live inside it) ---
+# --- Session State ---
 if "owner" not in st.session_state:
     st.session_state.owner = Owner(name="Jordan")
 
@@ -12,10 +12,9 @@ owner = st.session_state.owner
 
 st.title("🐾 PawPal+")
 
-# --- Owner Info ---
+# ── Owner ──────────────────────────────────────────────────────────────────────
 st.subheader("Owner")
-new_name = st.text_input("Owner name", value=owner.name)
-owner.name = new_name
+owner.name = st.text_input("Owner name", value=owner.name)
 
 st.markdown("**Availability Windows**")
 col_a1, col_a2 = st.columns(2)
@@ -29,13 +28,13 @@ if st.button("Add availability window"):
 
 if owner.get_availability_windows():
     for i, (s, e) in enumerate(owner.get_availability_windows()):
-        st.text(f"  Window {i+1}: {s.strftime('%I:%M %p')} - {e.strftime('%I:%M %p')}")
+        st.text(f"  Window {i+1}: {s.strftime('%I:%M %p')} – {e.strftime('%I:%M %p')}")
 else:
     st.info("No availability windows yet. Add one above.")
 
 st.divider()
 
-# --- Add a Pet ---
+# ── Pets ───────────────────────────────────────────────────────────────────────
 st.subheader("Pets")
 col_p1, col_p2 = st.columns(2)
 with col_p1:
@@ -44,52 +43,62 @@ with col_p2:
     species = st.selectbox("Species", ["dog", "cat", "bird", "fish", "other"])
 
 if st.button("Add pet"):
-    new_pet = Pet(name=pet_name, pet_type=species)
-    owner.add_pet(new_pet)
+    owner.add_pet(Pet(name=pet_name, pet_type=species))
 
 if owner.get_pets():
-    pet_names = [p.name for p in owner.get_pets()]
-    st.write(f"Your pets: {', '.join(pet_names)}")
+    st.write(f"Your pets: {', '.join(p.name for p in owner.get_pets())}")
 else:
     st.info("No pets yet. Add one above.")
 
 st.divider()
 
-# --- Add Tasks to a Pet ---
+# ── Tasks ──────────────────────────────────────────────────────────────────────
 st.subheader("Tasks")
 if owner.get_pets():
     pet_names = [p.name for p in owner.get_pets()]
     selected_pet_name = st.selectbox("Add task to pet", pet_names)
     selected_pet = next(p for p in owner.get_pets() if p.name == selected_pet_name)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         task_title = st.text_input("Task title", value="Morning walk")
     with col2:
-        duration = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=20)
+        duration = st.number_input("Duration (min)", min_value=1, max_value=240, value=20)
     with col3:
-        priority = st.number_input("Priority (1 = most urgent)", min_value=1, max_value=10, value=1)
+        priority = st.number_input("Priority (1 = urgent)", min_value=1, max_value=10, value=1)
+    with col4:
+        # frequency powers the recurring task feature in mark_complete()
+        frequency = st.selectbox("Repeats", ["none", "daily", "weekly"])
 
     if st.button("Add task"):
-        new_task = Task(task_type=task_title, priority=priority, duration=int(duration))
+        new_task = Task(
+            task_type=task_title,
+            priority=int(priority),
+            duration=int(duration),
+            frequency=None if frequency == "none" else frequency,
+        )
         selected_pet.add_requirement(new_task)
+        st.success(f"Added '{task_title}' to {selected_pet_name}.")
 
-    # Show tasks for each pet
     for pet in owner.get_pets():
         reqs = pet.get_requirements()
         if reqs:
             st.markdown(f"**{pet.name}'s tasks:**")
-            task_data = [
-                {"Task": t.get_type(), "Duration (min)": t.get_duration(), "Priority": t.get_priority()}
+            st.table([
+                {
+                    "Task": t.get_type(),
+                    "Duration (min)": t.get_duration(),
+                    "Priority": t.get_priority(),
+                    "Repeats": t.frequency or "—",
+                }
                 for t in reqs
-            ]
-            st.table(task_data)
+            ])
 else:
     st.info("Add a pet first, then you can assign tasks to it.")
 
 st.divider()
 
-# --- Generate Schedule ---
+# ── Generate Schedule ──────────────────────────────────────────────────────────
 st.subheader("Build Schedule")
 
 if st.button("Generate schedule"):
@@ -100,35 +109,93 @@ if st.button("Generate schedule"):
     else:
         scheduler = Scheduler()
         scheduler.reset()
-        schedule_map = scheduler.schedule_all(owner)
+        scheduler.schedule_all(owner)
 
+        total     = len(scheduler.all_scheduled_tasks)
+        skipped   = scheduler.get_skipped_tasks()
+        pending   = scheduler.filter_by_status("pending")
+        completed = scheduler.filter_by_status("complete")
+
+        # ── Summary metrics ───────────────────────────────────────────────────
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Scheduled",  total)
+        m2.metric("Pending",    len(pending))
+        m3.metric("Completed",  len(completed))
+        m4.metric("Skipped",    len(skipped))
+
+        st.divider()
+
+        # ── Per-pet schedule table (sorted by time) ───────────────────────────
         for pet in owner.get_pets():
+            # filter_by_pet() pulls only this pet's tasks from the shared pool
+            # sort_by_time() orders them chronologically for display
+            pet_tasks = scheduler.sort_by_time(scheduler.filter_by_pet(pet.name))
+
             st.markdown(f"### {pet.name} ({pet.pet_type})")
+
             if pet.get_health_problems():
                 st.caption(f"Health notes: {', '.join(pet.get_health_problems())}")
-            scheduled = schedule_map.get(pet.name, [])
-            if scheduled:
+
+            if pet_tasks:
                 rows = []
-                for task in scheduled:
+                for task in pet_tasks:
                     t = task.get_scheduled_time()
-                    time_str = t.strftime("%I:%M %p") if t else "N/A"
                     rows.append({
-                        "Time": time_str,
-                        "Task": task.get_type(),
+                        "Time":          t.strftime("%I:%M %p") if t else "—",
+                        "Task":          task.get_type(),
                         "Duration (min)": task.get_duration(),
-                        "Priority": task.get_priority(),
+                        "Priority":      task.get_priority(),
+                        "Repeats":       task.frequency or "—",
+                        "Status":        task.get_status(),
                     })
                 st.table(rows)
             else:
-                st.info(f"No tasks fit within availability for {pet.name}.")
+                st.info(f"No tasks could be scheduled for {pet.name}.")
 
-        skipped = scheduler.get_skipped_tasks()
+        st.divider()
+
+        # ── Conflict check ────────────────────────────────────────────────────
+        if scheduler.has_conflicts():
+            st.error("Scheduling conflicts detected — two or more tasks overlap.")
+        else:
+            st.success("Schedule generated — no conflicts detected.")
+
+        # ── Skipped tasks warning ─────────────────────────────────────────────
         if skipped:
             st.warning(
-                f"Could not schedule: {', '.join(t.get_type() for t in skipped)}"
+                f"{len(skipped)} task(s) could not fit in any availability window."
             )
+            with st.expander("See skipped tasks"):
+                st.table([
+                    {
+                        "Pet":           t.pet_name or "—",
+                        "Task":          t.get_type(),
+                        "Duration (min)": t.get_duration(),
+                        "Priority":      t.get_priority(),
+                    }
+                    for t in skipped
+                ])
 
-        if scheduler.has_conflicts():
-            st.error("Scheduling conflicts detected across pets.")
-        else:
-            st.success("Schedule generated — no conflicts.")
+        # ── Pending / completed breakdown ─────────────────────────────────────
+        if pending or completed:
+            with st.expander("View by status"):
+                if pending:
+                    st.markdown("**Pending**")
+                    st.table([
+                        {
+                            "Pet":  t.pet_name or "—",
+                            "Task": t.get_type(),
+                            "Time": ts.strftime("%I:%M %p") if (ts := t.get_scheduled_time()) else "—",
+                        }
+                        for t in scheduler.sort_by_time(pending)
+                    ])
+                if completed:
+                    st.markdown("**Completed**")
+                    st.table([
+                        {
+                            "Pet":  t.pet_name or "—",
+                            "Task": t.get_type(),
+                            "Time": ts.strftime("%I:%M %p") if (ts := t.get_scheduled_time()) else "—",
+                        }
+                        for t in scheduler.sort_by_time(completed)
+                    ])

@@ -1,58 +1,83 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ 🐾
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+A Streamlit app that helps pet owners build a smart daily care schedule across multiple pets — prioritizing tasks by urgency, health needs, and available time.
 
-## Scenario
+## 📸 Demo
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+<a href="/course_images/ai110/your_screenshot_name.png" target="_blank"><img src='/course_images/ai110/your_screenshot_name.png' title='PawPal App' width='' alt='PawPal App' class='center-block' /></a>
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
+---
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
+## Features
 
-## What you will build
+### Core Scheduling
+- **Priority-queue scheduling** — Tasks are placed into the owner's availability windows using a min-heap. Lower priority number = scheduled first. Built with Python's `heapq`.
+- **Multi-pet shared window pool** — `schedule_all()` runs every pet's tasks through one shared availability pool. Once a time slot is consumed, no other pet can use it — eliminating cross-pet time conflicts.
+- **Overlapping window merging** — If an owner adds two windows that overlap (e.g. 8–12 and 10–13), they are automatically merged into a single span (8–13) before scheduling so no capacity is double-counted.
+- **Bin-packing second pass** — Tasks that don't fit on the first scheduling pass are retried in any remaining window gaps, maximizing the number of tasks that get placed.
 
-Your final app should:
+### Smart Priority Adjustments
+- **Health-aware task boosting** — If a pet has a health condition (e.g. `"bad knees"`), related tasks (e.g. walks) are automatically promoted up one priority level so they're scheduled before lower-urgency work.
+- **Feeding interval boost** — If a pet hasn't been fed in over 6 hours, its feeding task is automatically elevated to priority 1 regardless of its original value.
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+### Recurring Tasks
+- **Daily and weekly recurrence** — Tasks can be marked `frequency="daily"` or `frequency="weekly"`. When `mark_complete()` is called, it returns a brand-new `Task` instance with `due_date` set to today + 1 day or today + 7 days using Python's `timedelta`. The current task is marked complete; the new one starts as `pending`.
 
-## Smarter Scheduling
+### Querying the Schedule
+- **`filter_by_pet(name)`** — Returns all scheduled tasks for a specific pet from the shared pool.
+- **`filter_by_status(status)`** — Returns all `"pending"` or `"complete"` tasks across all pets.
+- **`sort_by_time(tasks)`** — Returns a new list sorted by scheduled start time. Tasks with no assigned time are placed at the end.
 
-Several algorithmic improvements were added on top of the base priority-queue scheduler:
+### Conflict Detection
+- **Cross-pet conflict detection** — `has_conflicts()` checks `all_scheduled_tasks` (the full shared pool) for any two tasks whose time windows overlap. Returns `True` with a logged error if a conflict is found.
 
-| Feature | How it works |
-|---|---|
-| **Shared window pool** | `schedule_all()` schedules every pet's tasks into one shared availability pool, eliminating cross-pet time conflicts |
-| **Window merging** | Overlapping availability windows (e.g. 8–12 and 10–13) are merged before scheduling so no capacity is double-counted |
-| **Health-aware priority boost** | Tasks are automatically promoted if a pet's health condition is relevant (e.g. joint problems → walk tasks get boosted) |
-| **Feeding interval boost** | If a pet hasn't been fed in over 6 hours, its feeding task is elevated to priority 1 |
-| **Bin-packing second pass** | Tasks that don't fit on the first pass are retried in remaining window gaps instead of being silently dropped |
-| **Skipped task reporting** | Any task that couldn't be scheduled is surfaced as a warning rather than silently omitted |
-| **Recurring tasks** | Tasks with `frequency="daily"` or `"weekly"` auto-generate a new instance (with the correct next `due_date`) when marked complete, using Python's `timedelta` |
-| **Filter and sort helpers** | `filter_by_status()`, `filter_by_pet()`, and `sort_by_time()` allow querying the schedule after it is built |
+### Visibility
+- **Skipped task reporting** — Any task that couldn't fit in any availability window is tracked in `cached_skipped_tasks` and surfaced as a warning in the UI — never silently dropped.
 
-## Getting started
+---
 
-### Setup
+## Running the App
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-### Suggested workflow
+## Running Tests
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
+```bash
+pytest tests/test_pawpal.py -v
+```
+
+53 tests covering: Task creation and recurrence, Pet tracking, Owner availability, Scheduler priority ordering, sort correctness, conflict detection, and cross-pet filtering.
+
+---
+
+## Project Structure
+
+```
+pawpal-starter/
+├── pawpal_system.py   # Core classes: Task, Pet, Owner, Scheduler
+├── app.py             # Streamlit UI
+├── main.py            # CLI demo with sorting, filtering, and recurrence output
+├── tests/
+│   └── test_pawpal.py # 53 tests across 7 test classes
+├── class_diagram.md   # Final Mermaid UML diagram
+└── reflection.md      # Design decisions and tradeoffs
+```
+
+## Architecture
+
+```
+app.py / main.py
+    ↓  creates Owner, Pet, Task
+pawpal_system.py
+    ↓  Scheduler.schedule_all(owner)
+    ↓  → _apply_priority_boosts()   [health + feeding logic]
+    ↓  → _merge_windows()           [collapse overlapping windows]
+    ↓  → _resolve_priority_queue()  [min-heap + bin-packing]
+    ↓  → filter / sort helpers
+UI renders sorted, filtered schedule with conflict and skipped-task warnings
+```
