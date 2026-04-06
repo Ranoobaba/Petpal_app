@@ -58,6 +58,16 @@ Yes, significant changes were made to improve efficiency and functionality.
 - **Changed to:** Heap now stores (priority, task_id, task) for stable sorting
 - **Why:** Ensures deterministic ordering even when tasks have the same priority
 
+**7. Comprehensive Logging (Production-Ready)**
+- **Initial:** No logging system
+- **Changed to:** Added `logging` module with DEBUG and INFO level logs throughout the system
+- **Why:** Essential for production code—enables debugging, monitoring, and audit trails. Logs key events like:
+  - Task scheduling and prioritization
+  - Pet feeding/exercise activities
+  - Health problem alerts
+  - Conflict detection
+  - Schedule caching operations
+
 ---
 
 ## 2. Scheduling Logic and Tradeoffs

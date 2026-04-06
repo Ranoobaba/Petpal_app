@@ -3,6 +3,11 @@ from typing import List, Tuple, Optional
 from datetime import time, datetime
 import heapq
 import uuid
+import logging
+
+# Configure logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 @dataclass
 class Task:
@@ -60,6 +65,7 @@ class Pet:
     def feed(self) -> None:
         """Mark the pet as fed with current timestamp"""
         self.last_fed_time = datetime.now()
+        logger.info(f"Pet '{self.name}' has been fed at {self.last_fed_time.strftime('%H:%M:%S')}")
     
     def get_last_fed_time(self) -> Optional[datetime]:
         """Get the last time the pet was fed"""
@@ -72,6 +78,7 @@ class Pet:
     def add_health_problem(self, problem: str) -> None:
         """Add a health problem to the pet's record"""
         self.health_problems.append(problem)
+        logger.warning(f"Health issue added for pet '{self.name}': {problem}")
     
     def get_health_problems(self) -> List[str]:
         """Retrieve list of health problems"""
@@ -84,6 +91,7 @@ class Pet:
     def exercise(self) -> None:
         """Mark that the pet has exercised with current timestamp"""
         self.last_exercise_time = datetime.now()
+        logger.info(f"Pet '{self.name}' has exercised at {self.last_exercise_time.strftime('%H:%M:%S')}")
     
     def add_requirement(self, task: Task) -> None:
         """Add a task requirement for this pet"""
@@ -116,6 +124,7 @@ class Owner:
     def add_pet(self, pet: Pet) -> None:
         """Add a pet to the owner's pet list"""
         self.pets.append(pet)
+        logger.info(f"Owner '{self.name}' now has pet '{pet.name}' ({pet.pet_type})")
     
     def get_pets(self) -> List[Pet]:
         """Retrieve all pets owned by this owner"""
@@ -123,6 +132,10 @@ class Owner:
 
 
 @dataclass
+pass
+pass
+pass
+pass
 class Scheduler:
     """Orchestrates scheduling of tasks based on owner availability and pet requirements"""
     priority_heap: List[tuple] = field(default_factory=list)
@@ -130,21 +143,22 @@ class Scheduler:
     
     def schedule(self, owner: Owner, pet: Pet) -> List[Task]:
         """
-        Create a prioritized schedule of tasks for a pet within owner's availability
-        
+        Create a prioritized schedule of tasks for a pet within owner's availability.
+
+        Tasks are placed into the owner's availability windows in priority order
+        (lowest priority value = highest importance). If a task doesn't fit in any
+        remaining window, it is skipped — no partial completions.
+
         Args:
             owner: The owner with availability constraints
             pet: The pet with task requirements
-            
+
         Returns:
-            A prioritized list of scheduled tasks (lowest priority value first)
+            A list of tasks that fit within availability, sorted by scheduled time
         """
-        # Collect all tasks from pet requirements
         all_tasks = pet.get_requirements()
-        
-        # Resolve conflicts and prioritize using min heap
-        scheduled_tasks = self._resolve_priority_queue(all_tasks)
-        
+        availability = owner.get_availability_windows()
+        scheduled_tasks = self._resolve_priority_queue(all_tasks, availability)
         return scheduled_tasks
     
     def get_scheduled_tasks(self) -> List[Task]:
@@ -164,35 +178,68 @@ class Scheduler:
             # Check for overlap with existing scheduled times
             for existing_start, existing_end in scheduled_times:
                 if (start < existing_end and end > existing_start):
+                    logger.error(f"Task conflict detected: {task.get_type()} at {start} overlaps with scheduled time {existing_start}-{existing_end}")
                     return True
             scheduled_times.append((start, end))
+        logger.debug("Conflict check passed: no overlapping tasks")
         return False
     
-    def _resolve_priority_queue(self, tasks: List[Task]) -> List[Task]:
+    def _resolve_priority_queue(
+        self, tasks: List[Task], availability: List[Tuple[time, time]]
+    ) -> List[Task]:
         """
-        Prioritize tasks using min heap and fit them into owner's availability windows.
-        
+        Prioritize tasks using a min heap and fit them into owner's availability windows.
+
+        For each task (in priority order), we try to place it in the earliest
+        window that has enough remaining minutes.  If no window can hold the
+        task, it is skipped entirely (no partial completions).
+
         Args:
             tasks: List of tasks to prioritize and schedule
-            
+            availability: Owner's (start, end) time windows, already sorted
+
         Returns:
-            Tasks sorted by priority with scheduled times assigned
+            Tasks that fit, ordered by their assigned start time
         """
         # Clear previous heap
         self.priority_heap = []
-        
+
         # Build min heap: (priority, task_id, task)
-        # Smaller priority value = higher importance
         for task in tasks:
-            heapq.heappush(self.priority_heap, (task.get_priority(), task.get_task_id(), task))
-        
-        # Extract all tasks from heap in priority order
-        scheduled_tasks = []
+            heapq.heappush(
+                self.priority_heap,
+                (task.get_priority(), task.get_task_id(), task),
+            )
+
+        # Build a mutable list of windows tracking the next available start
+        # Each entry: [current_start, window_end]  (both as total minutes since midnight)
+        windows = []
+        for start, end in sorted(availability):
+            windows.append([start.hour * 60 + start.minute,
+                            end.hour * 60 + end.minute])
+
+        scheduled_tasks: List[Task] = []
+
         while self.priority_heap:
             priority, task_id, task = heapq.heappop(self.priority_heap)
-            scheduled_tasks.append(task)
-        
-        # Cache the scheduled tasks for fast retrieval
+            duration = task.get_duration()
+
+            # Try to fit task in the earliest window with enough room
+            for window in windows:
+                remaining = window[1] - window[0]
+                if remaining >= duration:
+                    # Assign start time and advance the window cursor
+                    start_hour, start_min = divmod(window[0], 60)
+                    task.set_scheduled_time(time(start_hour, start_min))
+                    window[0] += duration  # consume minutes from this window
+                    scheduled_tasks.append(task)
+                    break
+            # If no window could hold this task, it is skipped (no partial completions)
+
+        # Sort by scheduled start time so the list reads chronologically
+        scheduled_tasks.sort(key=lambda t: t.get_scheduled_time())
+
+        # Cache for fast retrieval
         self.cached_scheduled_tasks = scheduled_tasks
-        
+
         return scheduled_tasks
