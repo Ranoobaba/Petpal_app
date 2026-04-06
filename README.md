@@ -22,6 +22,21 @@ Your final app should:
 - Display the plan clearly (and ideally explain the reasoning)
 - Include tests for the most important scheduling behaviors
 
+## Smarter Scheduling
+
+Several algorithmic improvements were added on top of the base priority-queue scheduler:
+
+| Feature | How it works |
+|---|---|
+| **Shared window pool** | `schedule_all()` schedules every pet's tasks into one shared availability pool, eliminating cross-pet time conflicts |
+| **Window merging** | Overlapping availability windows (e.g. 8–12 and 10–13) are merged before scheduling so no capacity is double-counted |
+| **Health-aware priority boost** | Tasks are automatically promoted if a pet's health condition is relevant (e.g. joint problems → walk tasks get boosted) |
+| **Feeding interval boost** | If a pet hasn't been fed in over 6 hours, its feeding task is elevated to priority 1 |
+| **Bin-packing second pass** | Tasks that don't fit on the first pass are retried in remaining window gaps instead of being silently dropped |
+| **Skipped task reporting** | Any task that couldn't be scheduled is surfaced as a warning rather than silently omitted |
+| **Recurring tasks** | Tasks with `frequency="daily"` or `"weekly"` auto-generate a new instance (with the correct next `due_date`) when marked complete, using Python's `timedelta` |
+| **Filter and sort helpers** | `filter_by_status()`, `filter_by_pet()`, and `sort_by_time()` allow querying the schedule after it is built |
+
 ## Getting started
 
 ### Setup

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
-from datetime import time, datetime
+from datetime import date, time, datetime, timedelta
 import heapq
 import uuid
 import logging
@@ -18,6 +18,9 @@ class Task:
     status: str = "pending"
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     scheduled_start_time: Optional[time] = None
+    pet_name: Optional[str] = None
+    frequency: Optional[str] = None   # "daily" | "weekly" | None
+    due_date: date = field(default_factory=date.today)
     
     def get_priority(self) -> int:
         """Retrieve the priority level of this task"""
@@ -31,9 +34,34 @@ class Task:
         """Retrieve the type of task"""
         return self.task_type
     
-    def mark_complete(self) -> None:
-        """Mark this task as complete"""
+    def mark_complete(self) -> Optional["Task"]:
+        """
+        Mark this task as complete.
+
+        If the task has a frequency, returns a new Task instance due on the
+        next occurrence (today + 1 day for daily, + 7 days for weekly).
+        Returns None for one-off tasks.
+        """
         self.status = "complete"
+        logger.info(f"Task '{self.task_type}' marked complete (frequency={self.frequency})")
+
+        if self.frequency == "daily":
+            delta = timedelta(days=1)
+        elif self.frequency == "weekly":
+            delta = timedelta(weeks=1)
+        else:
+            return None
+
+        next_task = Task(
+            task_type=self.task_type,
+            priority=self.priority,
+            duration=self.duration,
+            frequency=self.frequency,
+            due_date=self.due_date + delta,
+            pet_name=self.pet_name,
+        )
+        logger.info(f"Next '{next_task.task_type}' auto-created — due {next_task.due_date}")
+        return next_task
     
     def get_status(self) -> str:
         """Retrieve the current status of this task"""
@@ -95,6 +123,7 @@ class Pet:
     
     def add_requirement(self, task: Task) -> None:
         """Add a task requirement for this pet"""
+        task.pet_name = self.name
         self.requirements.append(task)
     
     def get_requirements(self) -> List[Task]:
@@ -132,22 +161,20 @@ class Owner:
 
 
 @dataclass
-pass
-pass
-pass
-pass
 class Scheduler:
     """Orchestrates scheduling of tasks based on owner availability and pet requirements"""
     priority_heap: List[tuple] = field(default_factory=list)
     cached_scheduled_tasks: List[Task] = field(default_factory=list)
+    cached_skipped_tasks: List[Task] = field(default_factory=list)
+    all_scheduled_tasks: List[Task] = field(default_factory=list)
     
     def schedule(self, owner: Owner, pet: Pet) -> List[Task]:
         """
         Create a prioritized schedule of tasks for a pet within owner's availability.
 
-        Tasks are placed into the owner's availability windows in priority order
-        (lowest priority value = highest importance). If a task doesn't fit in any
-        remaining window, it is skipped — no partial completions.
+        Applies priority boosts for overdue feeding and health conditions before
+        scheduling. Merges overlapping availability windows. Accumulates results
+        into all_scheduled_tasks for cross-pet conflict detection.
 
         Args:
             owner: The owner with availability constraints
@@ -157,28 +184,159 @@ class Scheduler:
             A list of tasks that fit within availability, sorted by scheduled time
         """
         all_tasks = pet.get_requirements()
-        availability = owner.get_availability_windows()
-        scheduled_tasks = self._resolve_priority_queue(all_tasks, availability)
+        self._apply_priority_boosts(all_tasks, pet)
+        merged_availability = self._merge_windows(owner.get_availability_windows())
+        scheduled_tasks = self._resolve_priority_queue(all_tasks, merged_availability)
+        self.all_scheduled_tasks.extend(scheduled_tasks)
         return scheduled_tasks
+
+    def schedule_all(self, owner: Owner) -> dict:
+        """
+        Schedule all pets' tasks into a single shared window pool.
+
+        Prevents cross-pet conflicts by consuming window time globally — once a
+        slot is used for one pet's task, it is unavailable to all other pets.
+
+        Args:
+            owner: The owner whose pets and availability windows are used
+
+        Returns:
+            Dict mapping pet name → list of scheduled tasks (sorted by time)
+        """
+        all_tasks = []
+        for pet in owner.get_pets():
+            self._apply_priority_boosts(pet.get_requirements(), pet)
+            all_tasks.extend(pet.get_requirements())
+
+        merged_availability = self._merge_windows(owner.get_availability_windows())
+        scheduled = self._resolve_priority_queue(all_tasks, merged_availability)
+        self.all_scheduled_tasks = scheduled
+
+        result: dict = {}
+        for task in scheduled:
+            key = task.pet_name or "unknown"
+            result.setdefault(key, []).append(task)
+        return result
+
+    def reset(self) -> None:
+        """Clear all accumulated state before regenerating a full schedule"""
+        self.priority_heap = []
+        self.cached_scheduled_tasks = []
+        self.cached_skipped_tasks = []
+        self.all_scheduled_tasks = []
     
     def get_scheduled_tasks(self) -> List[Task]:
         """Retrieve the cached list of scheduled tasks in priority order"""
         return self.cached_scheduled_tasks
-    
+
+    def get_skipped_tasks(self) -> List[Task]:
+        """Retrieve tasks that could not be scheduled in any availability window"""
+        return self.cached_skipped_tasks
+
+    def filter_by_status(self, status: str) -> List[Task]:
+        """
+        Filter all scheduled tasks (across all pets) by completion status.
+
+        Args:
+            status: "pending" or "complete"
+
+        Returns:
+            List of tasks whose status matches the given value
+        """
+        return [t for t in self.all_scheduled_tasks if t.get_status() == status]
+
+    def filter_by_pet(self, pet_name: str) -> List[Task]:
+        """
+        Filter all scheduled tasks to those belonging to a specific pet.
+
+        Args:
+            pet_name: The name of the pet to filter by
+
+        Returns:
+            List of tasks assigned to that pet, in their current order
+        """
+        return [t for t in self.all_scheduled_tasks if t.pet_name == pet_name]
+
+    def sort_by_time(self, tasks: List[Task]) -> List[Task]:
+        """
+        Sort a list of tasks by their scheduled start time ascending.
+
+        Tasks with no scheduled time (None) are placed at the end.
+
+        Args:
+            tasks: Any list of Task objects
+
+        Returns:
+            A new sorted list — the original list is not modified
+        """
+        return sorted(tasks, key=lambda t: t.get_scheduled_time() or time.max)
+
+    @staticmethod
+    def _merge_windows(windows: List[Tuple[time, time]]) -> List[Tuple[time, time]]:
+        """
+        Merge overlapping or adjacent availability windows into minimal spans.
+
+        Prevents double-counting available time when the owner adds windows
+        that overlap (e.g. 8:00–12:00 and 10:00–13:00 → 8:00–13:00).
+
+        Args:
+            windows: List of (start, end) time tuples, any order
+
+        Returns:
+            Sorted list of non-overlapping (start, end) tuples
+        """
+        if not windows:
+            return []
+        sorted_windows = sorted(windows)
+        merged = [[sorted_windows[0][0], sorted_windows[0][1]]]
+        for start, end in sorted_windows[1:]:
+            if start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return [(s, e) for s, e in merged]
+
+    def _apply_priority_boosts(self, tasks: List[Task], pet: Pet) -> None:
+        """
+        Boost task priorities based on pet health conditions and feeding state.
+
+        - Overdue feeding (>6 hours since last fed): feeding task → priority 1
+        - Health keyword match: lower priority number by 1 (min 1)
+        """
+        HEALTH_KEYWORDS = {
+            "walk": {"knee", "joint", "arthritis", "hip"},
+            "feed": {"diabetes", "kidney", "liver", "diet"},
+        }
+        last_fed = pet.get_last_fed_time()
+        overdue_feeding = (
+            last_fed is not None
+            and (datetime.now() - last_fed).total_seconds() > 21600
+        )
+        for task in tasks:
+            task_lower = task.get_type().lower()
+            if "feed" in task_lower and overdue_feeding:
+                task.priority = 1
+                logger.info(f"Priority boosted: '{task.get_type()}' for '{pet.name}' — overdue feeding")
+            for keyword, conditions in HEALTH_KEYWORDS.items():
+                if keyword in task_lower:
+                    for problem in pet.get_health_problems():
+                        if any(c in problem.lower() for c in conditions):
+                            task.priority = max(1, task.priority - 1)
+                            logger.info(f"Priority boosted: '{task.get_type()}' for '{pet.name}' — health: {problem}")
+                            break
+
     def has_conflicts(self) -> bool:
-        """Check if there are any conflicting tasks (overlapping times)"""
+        """Check for overlapping tasks across all pets in the current schedule"""
         scheduled_times = []
-        for task in self.cached_scheduled_tasks:
+        for task in self.all_scheduled_tasks:
             start = task.get_scheduled_time()
             if start is None:
                 continue
-            end_minutes = start.minute + task.get_duration()
-            end = time(start.hour + end_minutes // 60, end_minutes % 60)
-            
-            # Check for overlap with existing scheduled times
+            end_minutes = start.hour * 60 + start.minute + task.get_duration()
+            end = time(end_minutes // 60, end_minutes % 60)
             for existing_start, existing_end in scheduled_times:
-                if (start < existing_end and end > existing_start):
-                    logger.error(f"Task conflict detected: {task.get_type()} at {start} overlaps with scheduled time {existing_start}-{existing_end}")
+                if start < existing_end and end > existing_start:
+                    logger.error(f"Conflict: '{task.get_type()}' at {start} overlaps {existing_start}-{existing_end}")
                     return True
             scheduled_times.append((start, end))
         logger.debug("Conflict check passed: no overlapping tasks")
@@ -219,27 +377,43 @@ class Scheduler:
                             end.hour * 60 + end.minute])
 
         scheduled_tasks: List[Task] = []
+        skipped_tasks: List[Task] = []
 
         while self.priority_heap:
             priority, task_id, task = heapq.heappop(self.priority_heap)
             duration = task.get_duration()
-
-            # Try to fit task in the earliest window with enough room
+            placed = False
             for window in windows:
-                remaining = window[1] - window[0]
-                if remaining >= duration:
-                    # Assign start time and advance the window cursor
+                if window[1] - window[0] >= duration:
                     start_hour, start_min = divmod(window[0], 60)
                     task.set_scheduled_time(time(start_hour, start_min))
-                    window[0] += duration  # consume minutes from this window
+                    window[0] += duration
                     scheduled_tasks.append(task)
+                    placed = True
                     break
-            # If no window could hold this task, it is skipped (no partial completions)
+            if not placed:
+                skipped_tasks.append(task)
 
-        # Sort by scheduled start time so the list reads chronologically
-        scheduled_tasks.sort(key=lambda t: t.get_scheduled_time())
+        # Second pass: fill remaining window gaps with skipped tasks (bin-packing)
+        still_skipped: List[Task] = []
+        for task in skipped_tasks:
+            duration = task.get_duration()
+            placed = False
+            for window in windows:
+                if window[1] - window[0] >= duration:
+                    start_hour, start_min = divmod(window[0], 60)
+                    task.set_scheduled_time(time(start_hour, start_min))
+                    window[0] += duration
+                    scheduled_tasks.append(task)
+                    placed = True
+                    logger.info(f"'{task.get_type()}' placed in second-pass bin-packing")
+                    break
+            if not placed:
+                still_skipped.append(task)
+                logger.warning(f"Could not schedule '{task.get_type()}' (duration={task.get_duration()}min) — no window fits")
 
-        # Cache for fast retrieval
+        scheduled_tasks.sort(key=lambda t: t.get_scheduled_time() or time.max)
         self.cached_scheduled_tasks = scheduled_tasks
+        self.cached_skipped_tasks = still_skipped
 
         return scheduled_tasks
